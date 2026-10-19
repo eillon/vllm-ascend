@@ -925,11 +925,12 @@ class TestSparseKVOffloadConfig(TestBase):
                 decode_context_parallel_size=1,
                 pipeline_parallel_size=1,
             ),
+            scheduler_config=SimpleNamespace(max_num_seqs=256),
             kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
             use_v2_model_runner=False,
             speculative_config=SimpleNamespace(method="dspark", num_speculative_tokens=3),
         )
-        with self.assertRaisesRegex(ValueError, "fused_copy_sfa does not support DSpark"):
+        with self.assertRaisesRegex(ValueError, "does not support DSpark"):
             SparseKVOffloadConfig.from_additional_config(
                 vllm_config,
                 {"enabled": True, "fused_op_type": "fused_copy_sfa", "topk_buffer_size": 8192},
@@ -952,6 +953,97 @@ class TestSparseKVOffloadConfig(TestBase):
     def test_non_dict_config_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "sparse_kv_offload_config must be a dict"):
             SparseKVOffloadConfig.from_additional_config(SimpleNamespace(), [])
+
+    def _mtp_vllm_config(self, num_speculative_tokens, method="deepseek_mtp", max_num_seqs=256):
+        spec = None
+        if num_speculative_tokens:
+            spec = SimpleNamespace(method=method, num_speculative_tokens=num_speculative_tokens)
+        return SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                pipeline_parallel_size=1,
+            ),
+            scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
+            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            use_v2_model_runner=False,
+            speculative_config=spec,
+        )
+
+    # Scenario B = fused_copy_sfa only; scenario C adds the shared-indexer-only
+    # offload with the side-stream miss onboard.
+    _MTP_SCENARIOS = (
+        {"enabled": True, "fused_op_type": "fused_copy_sfa"},
+        {
+            "enabled": True,
+            "fused_op_type": "fused_copy_sfa",
+            "offload_shared_indexer_only": True,
+            "miss_onboard_mode": "side_stream",
+        },
+    )
+
+    def test_mtp_supported_for_fused_copy_sfa_scenarios(self):
+        """Scenarios B and C accept MTP (1-6 speculative tokens, width<=7).
+
+        The hot budget widens with the query width: topk_buffer_size must be
+        256-aligned within [width*2048, 16128], width = 1+num_speculative_tokens.
+        """
+        for num_spec in (1, 2, 3, 6):
+            for scenario in self._MTP_SCENARIOS:
+                config = SparseKVOffloadConfig.from_additional_config(
+                    self._mtp_vllm_config(num_spec),
+                    {**scenario, "topk_buffer_size": (1 + num_spec) * 2048},
+                )
+                self.assertTrue(config.use_fused_copy_sfa)
+                expected_side_stream = scenario.get("miss_onboard_mode") == "side_stream"
+                self.assertIs(config.use_side_stream_onboard, expected_side_stream)
+
+    def test_hot_budget_rule_widens_with_mtp_width(self):
+        # 2304 serves width 1 (no MTP) but is too small for MTP-1 (width 2).
+        config = SparseKVOffloadConfig.from_additional_config(
+            self._mtp_vllm_config(0), {**self._MTP_SCENARIOS[0], "topk_buffer_size": 2304}
+        )
+        self.assertEqual(config.topk_buffer_size, 2304)
+        for scenario in self._MTP_SCENARIOS:
+            with self.assertRaisesRegex(ValueError, "hot budget"):
+                SparseKVOffloadConfig.from_additional_config(
+                    self._mtp_vllm_config(1), {**scenario, "topk_buffer_size": 2304}
+                )
+
+    def test_mtp_query_width_capped_at_seven(self):
+        for scenario in self._MTP_SCENARIOS:
+            with self.assertRaisesRegex(ValueError, "1–7 query rows"):
+                SparseKVOffloadConfig.from_additional_config(
+                    self._mtp_vllm_config(7), {**scenario, "topk_buffer_size": 8192}
+                )
+
+    def test_invalid_miss_onboard_mode_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "miss_onboard_mode must be inline or side_stream"):
+            SparseKVOffloadConfig.from_additional_config(
+                self._mtp_vllm_config(0),
+                {"enabled": True, "fused_op_type": "fused_copy_sfa", "miss_onboard_mode": "bogus"},
+            )
+        # The default stays valid without any miss_onboard_mode key.
+        config = SparseKVOffloadConfig.from_additional_config(
+            self._mtp_vllm_config(0), {**self._MTP_SCENARIOS[0], "topk_buffer_size": 8192}
+        )
+        self.assertFalse(config.use_side_stream_onboard)
+
+    def test_fused_copy_sfa_rejects_dummy_ring_overflow(self):
+        # The inactive-request dummy ring indexes LIM history arrays sized
+        # 2 * (max_num_seqs + 2); max_num_seqs < 6 lets the ring run past them.
+        with self.assertRaisesRegex(ValueError, "dummy hot-row ring"):
+            SparseKVOffloadConfig.from_additional_config(
+                self._mtp_vllm_config(0, max_num_seqs=4),
+                {**self._MTP_SCENARIOS[0], "topk_buffer_size": 8192},
+            )
+        # The boundary itself (max_num_seqs + 2 == ring size) is accepted.
+        config = SparseKVOffloadConfig.from_additional_config(
+            self._mtp_vllm_config(0, max_num_seqs=6),
+            {**self._MTP_SCENARIOS[0], "topk_buffer_size": 8192},
+        )
+        self.assertTrue(config.use_fused_copy_sfa)
 
 
 class TestSchedulerConfig(TestBase):

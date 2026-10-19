@@ -263,6 +263,7 @@ nav:
         - tutorials/features/pd_disaggregation_mooncake_multi_node.md
         - tutorials/features/dynamic_chunked_pipeline_parallel.md
         - tutorials/features/suffix_speculative_decoding.md
+        - tutorials/features/sparse_kv_offload_shared_indexer_only.md
         - tutorials/features/ray.md
     - faqs.md
   - User Guide:

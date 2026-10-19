@@ -46,7 +46,15 @@ def _make_boundary_decode_metadata():
 )
 def test_pd_decode_consumer_is_derived_from_kv_role(kv_transfer_config, expected):
     vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
-    with patch.object(AscendSFAMetadataBuilder, "__init__", return_value=None) as init:
+    with (
+        patch.object(AscendSFAMetadataBuilder, "__init__", return_value=None) as init,
+        # The builder init reads the fused-pipeline switch from the (lazily
+        # initialized) ascend config; keep it a no-op for this unit test.
+        patch(
+            "vllm_ascend.attention.sfa_kv_offload.get_ascend_config",
+            return_value=SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(use_fused_copy_sfa=False)),
+        ),
+    ):
         builder = AscendSFAKVOffloadMetadataBuilder(
             kv_cache_spec=None,
             layer_names=[],

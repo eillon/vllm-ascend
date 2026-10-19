@@ -268,7 +268,9 @@ On 950PR&950DT Products nodes, add `"memfabric_transfer_protocol": "device_urma"
 
 | Parameter | Description |
 | :--- | :--- |
-| `fused_op_type` | Set to `"fused_copy_sfa"` to enable fused LIM and Copy-SFA together. The default, `"none"`, uses the existing sparse offload path. |
+| `fused_op_type` | `"none"` (default) keeps the original sparse offload path (Lightning Indexer selection, CPU-side LRU residency planning, `sparse_copy` onboard, SFA attention). `"fused_copy_sfa"` enables the fused pipeline: LIM (top-k selection + residency management in one NPU operator) plus the fused Copy-SFA attention operator. |
+| `offload_shared_indexer_only` | Requires `fused_op_type=fused_copy_sfa`. Keep the KV cache of full (indexer-owner) layers resident in NPU paged caches and offload only the shared-indexer layers. See the [shared-indexer-only tutorial](../../tutorials/features/sparse_kv_offload_shared_indexer_only.md) for details. |
+| `miss_onboard_mode` | Requires `offload_shared_indexer_only=true`. `"inline"` (default) resolves misses inside the fused Copy-SFA kernel; `"side_stream"` pre-copies the group's misses on a side stream via the `npu_lim_copy_descriptors` operator, so members run direct-addressed attention with an all-zero miss plan. Falls back to `inline` when the operator is unavailable. |
 | `topk_buffer_size` | Device hot-buffer size. It must be at least `index_topk` and divisible by `block_size`. Twice `index_topk` is a practical starting point. |
 | `dram_size_per_dp_GB` | Host memory reserved per DP rank. It must hold the full KV cache. TP ranks share this pool. |
 | `keep_device_kv_cache` | Debug-only option that retains the full device KV cache. Keep it `false` in production. |

@@ -81,6 +81,9 @@ def populate(builder, cm, draft_index=None, *, reuse_topk=False):
         else:
             with patch(MODULE + ".AscendSFAMetadataBuilder.build_for_drafting", return_value=metadata):
                 metadata = builder.build_for_drafting(cm, draft_index=draft_index)
+    # The builder's H2D copies are non-blocking; make them visible before any
+    # graph replay / host assertion reads the step buffers.
+    torch.npu.synchronize()
     return metadata
 
 
@@ -219,6 +222,10 @@ def test_lim_consumes_shared_state_without_modifying_it(draft_index):
         setattr(impl, name, torch.full(shape, -999, dtype=torch.int32, device="npu"))
     impl.lim_reuse_request_count = 0
     impl.lim_key_scale = None
+    # Group-onboarding state read by _lim_select (normally set in __init__):
+    # empty group + inline mode means no side-stream launch.
+    impl._lim_share_members = []
+    impl.use_side_stream_onboard = False
     indexer = SimpleNamespace(
         k_cache=SimpleNamespace(kv_cache=[torch.empty((1, 128, 1, 128), dtype=torch.bfloat16, device="npu")])
     )
@@ -498,6 +505,12 @@ def test_draft_metadata_remains_valid_until_its_step_executes():
         if name == "copy_sfa_reuse_logical_lens":
             assert second.copy_sfa_reuse_logical_lens is None
             assert third.copy_sfa_reuse_logical_lens is None
+            continue
+        if name == "copy_sfa_token_bytes":
+            # Constant per-token byte sizes: the builder deliberately shares
+            # one tensor across steps, so the addresses alias by design.
+            shared = {getattr(md, name).data_ptr() for md in (first, second, third)}
+            assert len(shared) == 1, name
             continue
         addresses = {getattr(md, name).data_ptr() for md in (first, second, third)}
         assert len(addresses) == 3, name
