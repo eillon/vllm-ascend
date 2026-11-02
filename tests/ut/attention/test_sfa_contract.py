@@ -79,21 +79,17 @@ def test_non_fused_config_does_not_require_fused_kernel_fields():
     _validate_fused_copy_sfa_config(SimpleNamespace(), SimpleNamespace(use_fused_copy_sfa=False))
 
 
-def test_fused_config_rejects_dummy_ring_overflow():
-    """The inactive-request dummy ring indexes LIM history arrays sized
-    2 * (max_num_seqs + 2); max_num_seqs + 2 below the ring size would let
-    the ring indices run past them."""
+@pytest.mark.parametrize("max_num_seqs", [1, 4, 6, 256])
+def test_fused_config_accepts_small_concurrency(max_num_seqs):
+    """Small-capacity deployments must keep working: the dummy hot-row ring
+    no longer imposes a max_num_seqs minimum on the fused Copy-SFA path (the
+    LIM history arrays are sized to cover the whole ring). The validator is
+    path-agnostic: it runs at construction for both the original
+    full-offload path and offload_shared_indexer_only."""
     runtime = SimpleNamespace(
         speculative_config=None,
-        scheduler_config=SimpleNamespace(max_num_seqs=4),
+        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
     )
-    with pytest.raises(ValueError, match="dummy hot-row ring"):
-        _validate_fused_copy_sfa_config(
-            runtime,
-            SimpleNamespace(use_fused_copy_sfa=True, topk=2048, topk_buffer_size=4096),
-        )
-    # The boundary itself (max_num_seqs + 2 == ring size) is accepted.
-    runtime.scheduler_config = SimpleNamespace(max_num_seqs=6)
     _validate_fused_copy_sfa_config(
         runtime,
         SimpleNamespace(use_fused_copy_sfa=True, topk=2048, topk_buffer_size=4096),

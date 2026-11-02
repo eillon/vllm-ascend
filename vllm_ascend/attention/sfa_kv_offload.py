@@ -90,18 +90,6 @@ def _validate_fused_copy_sfa_config(vllm_config: VllmConfig, cfg: SparseKVOffloa
             "the dense short-sequence layout only lines up with the circular "
             f"tail slots when topk_buffer_size is a multiple of {COPY_SFA_TAIL_TOKENS}"
         )
-    # The inactive-request dummy rows share a DUMMY_POOL_ROW_COUNT ring
-    # whose row indices are capacity + [0, ring); the LIM history arrays
-    # are sized 2 * (max_num_seqs + 2), so a smaller capacity would let
-    # the ring indices run past them. Minimal test namespaces may omit the
-    # scheduler config; the bound is checked wherever it is available
-    # (both real callers pass full configs).
-    max_num_seqs = getattr(getattr(vllm_config, "scheduler_config", None), "max_num_seqs", None)
-    if max_num_seqs is not None and max_num_seqs + 2 < DUMMY_POOL_ROW_COUNT:
-        raise ValueError(
-            "fused_copy_sfa requires max_num_seqs + 2 >= "
-            f"{DUMMY_POOL_ROW_COUNT} (dummy hot-row ring bound), got max_num_seqs={max_num_seqs}"
-        )
 
 
 @dataclass
@@ -283,8 +271,15 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         }
         # Target and physical MTP-layer histories are independent.
         # Slot ownership is invalidated explicitly; lengths stay on device.
+        # The inactive-request dummy rows are pool indices
+        # capacity + [0, DUMMY_POOL_ROW_COUNT); size the histories so the
+        # whole ring stays in bounds for any max_num_seqs, including
+        # small-capacity deployments (the pool arena itself already
+        # allocates capacity + DUMMY_POOL_ROW_COUNT rows).
         banks = 1 + self.lim_mtp_layers
-        self.lim_last_prefix = torch.zeros((banks, 2 * requests), dtype=torch.int32, device=device)
+        self.lim_last_prefix = torch.zeros(
+            (banks, 2 * requests + DUMMY_POOL_ROW_COUNT), dtype=torch.int32, device=device
+        )
         self.lim_last_cache = torch.full_like(self.lim_last_prefix, -1)
         self.copy_sfa_hbm_block_table = torch.empty(
             (steps, requests, self.copy_sfa_stride_blocks), dtype=torch.int32, device=device
